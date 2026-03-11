@@ -1,19 +1,42 @@
-import json
+import sqlite3
 import uuid
-from pathlib import Path
+from contextlib import contextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel
 
-DATA_DIR = Path("data")
-USERS_FILE = DATA_DIR / "users.json"
+DB_PATH = "users.db"
 
-DATA_DIR.mkdir(exist_ok=True)
-if not USERS_FILE.exists():
-    USERS_FILE.write_text("[]")
 
-app = FastAPI(title="User API (File System Storage)")
+def init_db():
+    with get_conn() as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                email TEXT NOT NULL UNIQUE,
+                age INTEGER
+            )
+            """
+        )
+
+
+@contextmanager
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    try:
+        yield conn
+        conn.commit()
+    finally:
+        conn.close()
+
+
+app = FastAPI(title="User API (SQLite Storage)")
+
+init_db()
 
 
 class UserCreate(BaseModel):
@@ -26,56 +49,59 @@ class User(UserCreate):
     id: str
 
 
-def load_users() -> list[dict]:
-    return json.loads(USERS_FILE.read_text())
-
-
-def save_users(users: list[dict]) -> None:
-    USERS_FILE.write_text(json.dumps(users, indent=2))
+def row_to_user(row) -> dict:
+    return {"id": row["id"], "name": row["name"], "email": row["email"], "age": row["age"]}
 
 
 @app.post("/users", response_model=User, status_code=201)
 def create_user(user: UserCreate):
-    users = load_users()
-    if any(u["email"] == user.email for u in users):
+    user_id = str(uuid.uuid4())
+    try:
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO users (id, name, email, age) VALUES (?, ?, ?, ?)",
+                (user_id, user.name, user.email, user.age),
+            )
+    except sqlite3.IntegrityError:
         raise HTTPException(status_code=400, detail="Email already registered")
-    new_user = {"id": str(uuid.uuid4()), **user.model_dump()}
-    users.append(new_user)
-    save_users(users)
-    return new_user
+    return {"id": user_id, **user.model_dump()}
 
 
 @app.get("/users", response_model=list[User])
 def list_users():
-    return load_users()
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM users").fetchall()
+    return [row_to_user(r) for r in rows]
 
 
 @app.get("/users/{user_id}", response_model=User)
 def get_user(user_id: str):
-    users = load_users()
-    for user in users:
-        if user["id"] == user_id:
-            return user
-    raise HTTPException(status_code=404, detail="User not found")
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
+    if row is None:
+        raise HTTPException(status_code=404, detail="User not found")
+    return row_to_user(row)
 
 
 @app.put("/users/{user_id}", response_model=User)
 def update_user(user_id: str, updated: UserCreate):
-    users = load_users()
-    for i, user in enumerate(users):
-        if user["id"] == user_id:
-            if any(u["email"] == updated.email and u["id"] != user_id for u in users):
-                raise HTTPException(status_code=400, detail="Email already in use")
-            users[i] = {"id": user_id, **updated.model_dump()}
-            save_users(users)
-            return users[i]
-    raise HTTPException(status_code=404, detail="User not found")
+    with get_conn() as conn:
+        existing = conn.execute("SELECT id FROM users WHERE id = ?", (user_id,)).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="User not found")
+        try:
+            conn.execute(
+                "UPDATE users SET name = ?, email = ?, age = ? WHERE id = ?",
+                (updated.name, updated.email, updated.age, user_id),
+            )
+        except sqlite3.IntegrityError:
+            raise HTTPException(status_code=400, detail="Email already in use")
+    return {"id": user_id, **updated.model_dump()}
 
 
 @app.delete("/users/{user_id}", status_code=204)
 def delete_user(user_id: str):
-    users = load_users()
-    new_users = [u for u in users if u["id"] != user_id]
-    if len(new_users) == len(users):
-        raise HTTPException(status_code=404, detail="User not found")
-    save_users(new_users)
+    with get_conn() as conn:
+        result = conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
+        if result.rowcount == 0:
+            raise HTTPException(status_code=404, detail="User not found")

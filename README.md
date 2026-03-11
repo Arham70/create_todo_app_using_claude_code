@@ -1,6 +1,6 @@
-# User API — FastAPI + File System Storage
+# User API — FastAPI + SQLite Storage
 
-A simple REST API built with **FastAPI** that stores user data on the file system (JSON file) — no database required.
+A simple REST API built with **FastAPI** that stores user data in a **SQLite** database.
 
 ## Endpoints
 
@@ -33,7 +33,7 @@ API docs available at: http://127.0.0.1:8000/docs
 
 ## Storage
 
-User data is stored in `data/users.json` as a JSON array. Each user gets a UUID on creation.
+User data is stored in `users.db` (SQLite). The `users` table is created automatically on startup. Each user gets a UUID on creation.
 
 ## Test
 

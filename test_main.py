@@ -1,18 +1,21 @@
-import json
+import sqlite3
 import pytest
 from fastapi.testclient import TestClient
-from pathlib import Path
 import main as app_module
-from main import app, USERS_FILE
+from main import app, DB_PATH
 
 client = TestClient(app)
 
 
 @pytest.fixture(autouse=True)
-def clean_users_file():
-    USERS_FILE.write_text("[]")
+def clean_db():
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM users")
+        conn.commit()
     yield
-    USERS_FILE.write_text("[]")
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.execute("DELETE FROM users")
+        conn.commit()
 
 
 def test_create_user():
@@ -71,8 +74,10 @@ def test_delete_user():
     assert resp.status_code == 404
 
 
-def test_data_persists_to_file():
+def test_data_persists_to_db():
     client.post("/users", json={"name": "Alice", "email": "alice@example.com"})
-    users = json.loads(USERS_FILE.read_text())
-    assert len(users) == 1
-    assert users[0]["name"] == "Alice"
+    with sqlite3.connect(DB_PATH) as conn:
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute("SELECT * FROM users").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["name"] == "Alice"
